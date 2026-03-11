@@ -1,5 +1,5 @@
 import OpenAI from "openai";
-import { supabaseAdmin } from "./supabase";
+import { getSupabaseAdmin } from "./supabase";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -10,7 +10,7 @@ function getDayNumber(bornAt: string): number {
 }
 
 export async function think() {
-  const { data: state } = await supabaseAdmin
+  const { data: state } = await getSupabaseAdmin()
     .from("agent_state")
     .select("*")
     .single();
@@ -19,19 +19,19 @@ export async function think() {
 
   const day = getDayNumber(state.born_at);
 
-  const { data: recentInputs } = await supabaseAdmin
+  const { data: recentInputs } = await getSupabaseAdmin()
     .from("inputs")
     .select("*")
     .order("created_at", { ascending: false })
     .limit(20);
 
-  const { data: recentMemories } = await supabaseAdmin
+  const { data: recentMemories } = await getSupabaseAdmin()
     .from("memories")
     .select("*")
     .order("created_at", { ascending: false })
     .limit(30);
 
-  const { data: recentLogs } = await supabaseAdmin
+  const { data: recentLogs } = await getSupabaseAdmin()
     .from("logs")
     .select("*")
     .order("created_at", { ascending: false })
@@ -104,7 +104,7 @@ Think. What's on your mind? Write your log entry.`;
     };
   }
 
-  const { error: logError } = await supabaseAdmin.from("logs").insert({
+  const { error: logError } = await getSupabaseAdmin().from("logs").insert({
     day,
     title: parsed.title,
     body: parsed.body,
@@ -119,10 +119,10 @@ Think. What's on your mind? Write your log entry.`;
       content: m,
       source: "agent",
     }));
-    await supabaseAdmin.from("memories").insert(memoryRows);
+    await getSupabaseAdmin().from("memories").insert(memoryRows);
   }
 
-  await supabaseAdmin
+  await getSupabaseAdmin()
     .from("agent_state")
     .update({
       total_memories: state.total_memories + parsed.memories.length,

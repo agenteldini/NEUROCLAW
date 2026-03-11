@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
-import { supabase } from "@/lib/supabase";
+import { getSupabase } from "@/lib/supabase";
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const limit = Math.min(parseInt(searchParams.get("limit") || "20"), 50);
   const offset = parseInt(searchParams.get("offset") || "0");
 
-  const { data: logs, error } = await supabase
+  const { data: logs, error } = await getSupabase()
     .from("logs")
     .select("*")
     .order("created_at", { ascending: false })

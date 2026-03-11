@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
-import { supabase } from "@/lib/supabase";
+import { getSupabase } from "@/lib/supabase";
 
 export async function GET() {
-  const { data: state } = await supabase
+  const { data: state } = await getSupabase()
     .from("agent_state")
     .select("*")
     .single();

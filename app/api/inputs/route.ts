@@ -1,12 +1,11 @@
 import { NextResponse } from "next/server";
-import { supabase } from "@/lib/supabase";
-import { supabaseAdmin } from "@/lib/supabase";
+import { getSupabase, getSupabaseAdmin } from "@/lib/supabase";
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const limit = Math.min(parseInt(searchParams.get("limit") || "30"), 50);
 
-  const { data: inputs, error } = await supabase
+  const { data: inputs, error } = await getSupabase()
     .from("inputs")
     .select("*")
     .order("created_at", { ascending: false })
@@ -27,7 +26,9 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "empty input" }, { status: 400 });
   }
 
-  const { error: insertError } = await supabaseAdmin
+  const admin = getSupabaseAdmin();
+
+  const { error: insertError } = await admin
     .from("inputs")
     .insert({ text });
 
@@ -35,9 +36,13 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: insertError.message }, { status: 500 });
   }
 
-  await supabaseAdmin
+  const { count } = await admin
+    .from("inputs")
+    .select("id", { count: "exact", head: true });
+
+  await admin
     .from("agent_state")
-    .update({ total_inputs: (await supabaseAdmin.from("inputs").select("id", { count: "exact", head: true })).count || 0 })
+    .update({ total_inputs: count || 0 })
     .eq("id", 1);
 
   return NextResponse.json({ ok: true });
