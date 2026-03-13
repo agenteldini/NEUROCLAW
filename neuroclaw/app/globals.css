@@ -1,0 +1,39 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #EFF1F3;
+  --brick: #C9452E;
+  --brick-soft: rgba(201, 69, 46, 0.08);
+  --brick-mid: rgba(201, 69, 46, 0.15);
+  --dark: #111111;
+  --gray-800: #222222;
+  --gray-600: #555555;
+  --gray-400: #999999;
+  --gray-300: #BBBBBB;
+  --gray-200: #D8D8D8;
+  --white: #FFFFFF;
+  --card-border: rgba(0, 0, 0, 0.06);
+}
+
+@theme inline {
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--bg);
+  color: var(--dark);
+  font-family: 'Satoshi', system-ui, -apple-system, sans-serif;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  font-family: inherit;
+}
+
+::selection {
+  background: var(--brick);
+  color: white;
+}
+
+::-webkit-scrollbar { width: 0px; }
