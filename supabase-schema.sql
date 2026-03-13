@@ -36,6 +36,14 @@ create table if not exists memories (
   created_at timestamptz not null default now()
 );
 
+-- rate limit: one row per input attempt (by ip), used to throttle spam
+create table if not exists input_rate_limit (
+  id bigint generated always as identity primary key,
+  ip text not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists idx_input_rate_limit_ip_time on input_rate_limit (ip, created_at desc);
+
 create index if not exists idx_logs_created on logs (created_at desc);
 create index if not exists idx_inputs_created on inputs (created_at desc);
 create index if not exists idx_memories_created on memories (created_at desc);
@@ -45,10 +53,12 @@ alter table logs enable row level security;
 alter table inputs enable row level security;
 alter table memories enable row level security;
 alter table agent_state enable row level security;
+alter table input_rate_limit enable row level security;
 
 create policy "logs are public" on logs for select using (true);
 create policy "inputs are public" on inputs for select using (true);
 create policy "anyone can send input" on inputs for insert with check (true);
+-- input_rate_limit: no public policy (only backend/service_role uses it)
 create policy "agent_state is public" on agent_state for select using (true);
 create policy "memories are public" on memories for select using (true);
 

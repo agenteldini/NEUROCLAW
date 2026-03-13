@@ -26,6 +26,7 @@ export default function InputWall() {
   const [input, setInput] = useState("");
   const [sent, setSent] = useState(false);
   const [sending, setSending] = useState(false);
+  const [rateLimitMsg, setRateLimitMsg] = useState("");
 
   useEffect(() => {
     async function load() {
@@ -60,7 +61,12 @@ export default function InputWall() {
         setMessages((prev) => [newMsg, ...prev]);
         setInput("");
         setSent(true);
+        setRateLimitMsg("");
         setTimeout(() => setSent(false), 3000);
+      } else if (res.status === 429) {
+        const data = await res.json().catch(() => ({}));
+        setRateLimitMsg(data.error || "too many messages. wait a moment.");
+        setTimeout(() => setRateLimitMsg(""), 5000);
       }
     } catch {}
 
@@ -99,8 +105,8 @@ export default function InputWall() {
           </button>
         </div>
         <div className="flex justify-between mt-2">
-          <p className="text-[12px]" style={{ color: "var(--gray-300)" }}>
-            {sent ? "received. neuroclaw will remember this." : "280 characters. neuroclaw reads everything."}
+          <p className="text-[12px]" style={{ color: rateLimitMsg ? "var(--brick)" : "var(--gray-300)" }}>
+            {rateLimitMsg || (sent ? "received. neuroclaw will remember this." : "280 characters. neuroclaw reads everything.")}
           </p>
           <span className="text-[12px]" style={{ color: input.length > 260 ? "var(--brick)" : "var(--gray-300)" }}>
             {input.length}/280

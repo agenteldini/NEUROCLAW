@@ -18,6 +18,17 @@ export async function GET(request: Request) {
   return NextResponse.json(inputs);
 }
 
+function getClientIp(request: Request): string {
+  const forwarded = request.headers.get("x-forwarded-for");
+  if (forwarded) return forwarded.split(",")[0].trim();
+  const real = request.headers.get("x-real-ip");
+  if (real) return real;
+  return "unknown";
+}
+
+const RATE_WINDOW_SEC = 60;
+const RATE_MAX_PER_WINDOW = 2;
+
 export async function POST(request: Request) {
   let body;
   try {
@@ -32,6 +43,21 @@ export async function POST(request: Request) {
   }
 
   const admin = getSupabaseAdmin();
+  const ip = getClientIp(request);
+
+  const windowStart = new Date(Date.now() - RATE_WINDOW_SEC * 1000).toISOString();
+  const { count } = await admin
+    .from("input_rate_limit")
+    .select("id", { count: "exact", head: true })
+    .eq("ip", ip)
+    .gte("created_at", windowStart);
+
+  if (count !== null && count >= RATE_MAX_PER_WINDOW) {
+    return NextResponse.json(
+      { error: "too many messages. wait a moment." },
+      { status: 429 }
+    );
+  }
 
   const { error: insertError } = await admin
     .from("inputs")
@@ -41,13 +67,15 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: insertError.message }, { status: 500 });
   }
 
-  const { count } = await admin
+  await admin.from("input_rate_limit").insert({ ip });
+
+  const { count: totalCount } = await admin
     .from("inputs")
     .select("id", { count: "exact", head: true });
 
   await admin
     .from("agent_state")
-    .update({ total_inputs: count || 0 })
+    .update({ total_inputs: totalCount || 0 })
     .eq("id", 1);
 
   return NextResponse.json({ ok: true });
