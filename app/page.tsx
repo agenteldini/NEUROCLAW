@@ -20,6 +20,9 @@ export default function Home() {
         <p className="mt-8 max-w-[340px] text-[16px] leading-relaxed" style={{ color: "var(--gray-600)" }}>
           an agent that never stops running. never stops remembering. everything it sees, it keeps.
         </p>
+        <p className="mt-5 text-[12px] font-mono tracking-wide" style={{ color: "var(--gray-300)" }}>
+          CA: GJeHzZkHUGMmCr9iVckA3uvcPLpupV3cADCsK8Lbpump
+        </p>
       </section>
 
       <Divider />
