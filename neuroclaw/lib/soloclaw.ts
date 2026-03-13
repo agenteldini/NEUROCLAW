@@ -38,6 +38,8 @@ interface CycleResult {
   strategy: string;
   txs: string[];
   skipped: boolean;
+  migrated?: boolean;
+  lpError?: string;
   error?: string;
 }
 
@@ -140,7 +142,7 @@ async function addLiquidity(
   mint: PublicKey,
   lpLamports: number,
   txs: string[]
-): Promise<number> {
+): Promise<{ sol: number; error?: string }> {
   try {
     const onlineAmm = new OnlinePumpAmmSdk(connection);
     const poolPda = canonicalPumpPoolPda(mint);
@@ -175,10 +177,11 @@ async function addLiquidity(
     const depositSig = await sendTx(connection, depositTx, keypair);
     txs.push(depositSig);
 
-    return lpLamports / 1e9;
+    return { sol: lpLamports / 1e9 };
   } catch (err) {
-    console.error("LP failed, falling back to buyback:", err instanceof Error ? err.message : err);
-    return -1; // signal to caller to fall back
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("LP failed, falling back to buyback:", msg);
+    return { sol: -1, error: msg };
   }
 }
 
@@ -304,6 +307,7 @@ export async function runCycle(): Promise<CycleResult> {
   const strategy = isMigrated ? pickStrategy() : { name: "full-burn", buybackFraction: 1.0, lpFraction: 0.0 };
 
   let lpSol = 0;
+  let lpError: string | undefined;
   let buyLamports = availableLamports;
 
   // 3. LP (if applicable)
@@ -312,11 +316,11 @@ export async function runCycle(): Promise<CycleResult> {
     buyLamports = availableLamports - lpLamports;
 
     const lpResult = await addLiquidity(connection, keypair, mint, lpLamports, txs);
-    if (lpResult === -1) {
-      // LP failed — redirect to buyback
+    if (lpResult.sol === -1) {
+      lpError = lpResult.error;
       buyLamports = availableLamports;
     } else {
-      lpSol = lpResult;
+      lpSol = lpResult.sol;
     }
   }
 
@@ -333,5 +337,5 @@ export async function runCycle(): Promise<CycleResult> {
   // 5. Save
   await saveStats(balanceSol, buySol, burnedAmount, lpSol, strategy.name, txs);
 
-  return { claimed: balanceSol, boughtBack: buySol, burned: burnedAmount, lpSol, strategy: strategy.name, txs, skipped: false };
+  return { claimed: balanceSol, boughtBack: buySol, burned: burnedAmount, lpSol, strategy: strategy.name, migrated: isMigrated, lpError, txs, skipped: false };
 }
