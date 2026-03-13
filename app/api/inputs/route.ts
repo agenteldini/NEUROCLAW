@@ -28,6 +28,18 @@ function getClientIp(request: Request): string {
 
 const RATE_WINDOW_SEC = 60;
 const RATE_MAX_PER_WINDOW = 2;
+const RATE_DAILY_MAX = 5;
+
+const BLOCKED_PHRASES = [
+  "this tek is shit",
+  "hacked you mfss",
+  "neuroshit",
+];
+
+function isBlocked(input: string): boolean {
+  const normalized = input.toLowerCase().trim();
+  return BLOCKED_PHRASES.some((phrase) => normalized.includes(phrase));
+}
 
 export async function POST(request: Request) {
   let body;
@@ -40,6 +52,10 @@ export async function POST(request: Request) {
 
   if (!text) {
     return NextResponse.json({ error: "empty input" }, { status: 400 });
+  }
+
+  if (isBlocked(text)) {
+    return NextResponse.json({ error: "message not allowed." }, { status: 400 });
   }
 
   const admin = getSupabaseAdmin();
@@ -56,6 +72,32 @@ export async function POST(request: Request) {
     return NextResponse.json(
       { error: "too many messages. wait a moment." },
       { status: 429 }
+    );
+  }
+
+  const dayStart = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const { count: dailyCount } = await admin
+    .from("input_rate_limit")
+    .select("id", { count: "exact", head: true })
+    .eq("ip", ip)
+    .gte("created_at", dayStart);
+
+  if (dailyCount !== null && dailyCount >= RATE_DAILY_MAX) {
+    return NextResponse.json(
+      { error: "daily limit reached." },
+      { status: 429 }
+    );
+  }
+
+  const { count: dupCount } = await admin
+    .from("inputs")
+    .select("id", { count: "exact", head: true })
+    .eq("text", text);
+
+  if (dupCount !== null && dupCount > 0) {
+    return NextResponse.json(
+      { error: "this message already exists." },
+      { status: 400 }
     );
   }
 
