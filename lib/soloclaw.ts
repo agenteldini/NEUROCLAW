@@ -145,37 +145,39 @@ async function addLiquidity(
 ): Promise<{ sol: number; error?: string }> {
   try {
     const onlineAmm = new OnlinePumpAmmSdk(connection);
+    const pumpAmmSdk = new PumpAmmSdk();
     const poolPda = canonicalPumpPoolPda(mint);
     const ata = getAssociatedTokenAddressSync(mint, keypair.publicKey, true, TOKEN_2022_PROGRAM_ID);
 
-    // 65% of LP allocation buys tokens, 35% goes as SOL into the pool
-    const buyLamports = Math.floor(lpLamports * 0.65);
-    const depositSolLamports = Math.floor(lpLamports * 0.35);
-    const buyBn = new BN(buyLamports);
+    // Split 50/50: half as SOL deposit, half to buy the required base tokens
+    const depositSolLamports = Math.floor(lpLamports * 0.5);
+    const depositSolBN = new BN(depositSolLamports);
 
-    // 1. Buy tokens for LP
+    // 1. Calculate exactly how many tokens and LP tokens we need for our SOL budget
+    const liquidityState = await onlineAmm.liquiditySolanaState(poolPda, keypair.publicKey, ata);
+    const { base: tokensNeeded, lpToken } = pumpAmmSdk.depositAutocompleteBaseAndLpTokenFromQuote(
+      liquidityState,
+      depositSolBN,
+      5,
+    );
+
+    if (tokensNeeded.isZero() || lpToken.isZero()) return { sol: 0 };
+
+    // 2. Buy exactly the tokens needed for the deposit
     const swapState = await onlineAmm.swapSolanaState(poolPda, keypair.publicKey, ata);
-    const buyIx = await PUMP_AMM_SDK.buyQuoteInput(swapState, buyBn, 5);
+    const buyIx = await PUMP_AMM_SDK.buyBaseInput(swapState, tokensNeeded, 5);
     appendV2Account(buyIx, PUMP_AMM_PROGRAM_ID, poolV2Pda(mint));
     const buyTx = new Transaction().add(...buyIx);
-    const buySig = await sendTx(connection, buyTx, keypair);
-    txs.push(buySig);
+    txs.push(await sendTx(connection, buyTx, keypair));
 
     await new Promise((r) => setTimeout(r, 3000));
 
-    // 2. Deposit tokens + SOL into pool
-    const tokenInfo = await connection.getTokenAccountBalance(ata);
-    const tokenAmount = BigInt(tokenInfo.value.amount);
-    if (tokenAmount === BigInt(0)) return { sol: 0 };
-
-    const liquidityState = await onlineAmm.liquiditySolanaState(poolPda, keypair.publicKey, ata);
-    const lpToken = new BN(tokenAmount.toString());
-    const pumpAmmSdk = new PumpAmmSdk();
-    const depositIx = await pumpAmmSdk.depositInstructions(liquidityState, lpToken, 5);
+    // 3. Deposit tokens + SOL using the pre-calculated LP token amount
+    const freshLiquidityState = await onlineAmm.liquiditySolanaState(poolPda, keypair.publicKey, ata);
+    const depositIx = await pumpAmmSdk.depositInstructions(freshLiquidityState, lpToken, 5);
     appendV2Account(depositIx, PUMP_AMM_PROGRAM_ID, poolV2Pda(mint));
     const depositTx = new Transaction().add(...depositIx);
-    const depositSig = await sendTx(connection, depositTx, keypair);
-    txs.push(depositSig);
+    txs.push(await sendTx(connection, depositTx, keypair));
 
     return { sol: lpLamports / 1e9 };
   } catch (err) {
