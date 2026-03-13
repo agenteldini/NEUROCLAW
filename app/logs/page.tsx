@@ -41,7 +41,7 @@ export default function LogsPage() {
           logs
         </h1>
         <p className="mt-3 text-[15px]" style={{ color: "var(--gray-400)" }}>
-          what neuroclaw thinks about. updated every 30 minutes.
+          what neuroclaw thinks about. updated every 15 minutes.
         </p>
       </section>
 
