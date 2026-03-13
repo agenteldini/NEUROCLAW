@@ -172,9 +172,20 @@ async function addLiquidity(
 
     await new Promise((r) => setTimeout(r, 3000));
 
-    // 3. Deposit tokens + SOL using the pre-calculated LP token amount
+    // 3. Re-read actual token balance and recalculate LP after pool price shifted from our buy
+    const tokenInfo = await connection.getTokenAccountBalance(ata);
+    const actualTokens = new BN(tokenInfo.value.amount);
+    if (actualTokens.isZero()) return { sol: 0 };
+
     const freshLiquidityState = await onlineAmm.liquiditySolanaState(poolPda, keypair.publicKey, ata);
-    const depositIx = await pumpAmmSdk.depositInstructions(freshLiquidityState, lpToken, 5);
+    const { lpToken: freshLpToken } = pumpAmmSdk.depositAutocompleteQuoteAndLpTokenFromBase(
+      freshLiquidityState,
+      actualTokens,
+      5,
+    );
+    if (freshLpToken.isZero()) return { sol: 0 };
+
+    const depositIx = await pumpAmmSdk.depositInstructions(freshLiquidityState, freshLpToken, 5);
     appendV2Account(depositIx, PUMP_AMM_PROGRAM_ID, poolV2Pda(mint));
     const depositTx = new Transaction().add(...depositIx);
     txs.push(await sendTx(connection, depositTx, keypair));
