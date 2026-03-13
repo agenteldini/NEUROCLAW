@@ -33,9 +33,35 @@ interface CycleResult {
   claimed: number;
   boughtBack: number;
   burned: string;
+  lpSol: number;
+  strategy: string;
   txs: string[];
   skipped: boolean;
   error?: string;
+}
+
+interface Strategy {
+  name: string;
+  buybackFraction: number;
+  lpFraction: number;
+}
+
+const STRATEGIES: (Strategy & { weight: number })[] = [
+  { name: "burn-heavy",  buybackFraction: 0.85, lpFraction: 0.15, weight: 30 },
+  { name: "balanced",    buybackFraction: 0.50, lpFraction: 0.50, weight: 25 },
+  { name: "lp-focus",   buybackFraction: 0.15, lpFraction: 0.85, weight: 20 },
+  { name: "full-burn",  buybackFraction: 1.00, lpFraction: 0.00, weight: 15 },
+  { name: "full-lp",    buybackFraction: 0.00, lpFraction: 1.00, weight: 10 },
+];
+
+function pickStrategy(): Strategy {
+  const total = STRATEGIES.reduce((s, x) => s + x.weight, 0);
+  let r = Math.random() * total;
+  for (const s of STRATEGIES) {
+    r -= s.weight;
+    if (r <= 0) return s;
+  }
+  return STRATEGIES[0];
 }
 
 function getConfig() {
@@ -107,7 +133,55 @@ async function checkMigration(connection: Connection, mint: PublicKey): Promise<
   }
 }
 
-async function saveStats(claimed: number, boughtBack: number, burned: string, txs: string[]) {
+async function addLiquidity(
+  connection: Connection,
+  keypair: Keypair,
+  mint: PublicKey,
+  lpLamports: number,
+  txs: string[]
+): Promise<number> {
+  try {
+    const onlineAmm = new OnlinePumpAmmSdk(connection);
+    const poolPda = canonicalPumpPoolPda(mint);
+    const ata = getAssociatedTokenAddressSync(mint, keypair.publicKey, true, TOKEN_2022_PROGRAM_ID);
+
+    // 65% of LP allocation buys tokens, 35% goes as SOL into the pool
+    const buyLamports = Math.floor(lpLamports * 0.65);
+    const depositSolLamports = Math.floor(lpLamports * 0.35);
+    const buyBn = new BN(buyLamports);
+
+    // 1. Buy tokens for LP
+    const swapState = await onlineAmm.swapSolanaState(poolPda, keypair.publicKey, ata);
+    const buyIx = await PUMP_AMM_SDK.buyQuoteInput(swapState, buyBn, 5);
+    appendV2Account(buyIx, PUMP_AMM_PROGRAM_ID, poolV2Pda(mint));
+    const buyTx = new Transaction().add(...buyIx);
+    const buySig = await sendTx(connection, buyTx, keypair);
+    txs.push(buySig);
+
+    await new Promise((r) => setTimeout(r, 3000));
+
+    // 2. Deposit tokens + SOL into pool
+    const tokenInfo = await connection.getTokenAccountBalance(ata);
+    const tokenAmount = BigInt(tokenInfo.value.amount);
+    if (tokenAmount === BigInt(0)) return 0;
+
+    const depositSolBn = new BN(depositSolLamports);
+    const liquidityState = await onlineAmm.depositSolanaState(poolPda, keypair.publicKey, ata);
+    const lpToken = new BN(tokenAmount.toString());
+    const depositIx = await onlineAmm.depositInstructions(liquidityState, lpToken, depositSolBn, 5);
+    appendV2Account(depositIx, PUMP_AMM_PROGRAM_ID, poolV2Pda(mint));
+    const depositTx = new Transaction().add(...depositIx);
+    const depositSig = await sendTx(connection, depositTx, keypair);
+    txs.push(depositSig);
+
+    return lpLamports / 1e9;
+  } catch (err) {
+    console.error("LP failed, falling back to buyback:", err instanceof Error ? err.message : err);
+    return -1; // signal to caller to fall back
+  }
+}
+
+async function saveStats(claimed: number, boughtBack: number, burned: string, lpSol: number, strategy: string, txs: string[]) {
   const db = getSupabaseAdmin();
   const { data: existing } = await db
     .from("agent_stats")
@@ -120,58 +194,34 @@ async function saveStats(claimed: number, boughtBack: number, burned: string, tx
     total_claimed: (existing?.total_claimed || 0) + claimed,
     total_bought_back: (existing?.total_bought_back || 0) + boughtBack,
     total_burned: (BigInt(existing?.total_burned || "0") + BigInt(burned)).toString(),
+    total_lp_sol: (existing?.total_lp_sol || 0) + lpSol,
     last_run_at: new Date().toISOString(),
     transactions: txs,
     updated_at: new Date().toISOString(),
   });
 }
 
-export async function runCycle(): Promise<CycleResult> {
-  const { keypair, mint, rpcUrl, minClaimSol } = getConfig();
-  const connection = new Connection(rpcUrl, "confirmed");
-  const sdk = new OnlinePumpSdk(connection);
-  const txs: string[] = [];
-
-  const balanceLamports = await sdk.getCreatorVaultBalanceBothPrograms(keypair.publicKey);
-  const balanceSol = balanceLamports.toNumber() / 1e9;
-
-  if (balanceSol < minClaimSol) {
-    return { claimed: 0, boughtBack: 0, burned: "0", txs: [], skipped: true };
-  }
-
-  // 1. Claim fees (with v2 PDA for both programs)
-  const claimIx = await sdk.collectCoinCreatorFeeInstructions(keypair.publicKey, keypair.publicKey);
-  appendV2Account(claimIx, PUMP_PROGRAM_ID, bondingCurveV2Pda(mint));
-  appendV2Account(claimIx, PUMP_AMM_PROGRAM_ID, poolV2Pda(mint));
-  const claimTx = new Transaction().add(...claimIx);
-  const claimSig = await sendTx(connection, claimTx, keypair);
-  txs.push(claimSig);
-
-  await new Promise((r) => setTimeout(r, 3000));
-
-  const txFeeSol = 0.005;
-  const buyLamports = Math.max(0, balanceLamports.toNumber() - txFeeSol * 1e9);
-  if (buyLamports <= 0) {
-    await saveStats(balanceSol, 0, "0", txs);
-    return { claimed: balanceSol, boughtBack: 0, burned: "0", txs, skipped: false };
-  }
-
+async function doBuyback(
+  connection: Connection,
+  keypair: Keypair,
+  mint: PublicKey,
+  sdk: OnlinePumpSdk,
+  isMigrated: boolean,
+  buyLamports: number,
+  txs: string[]
+): Promise<{ buySol: number; burnedAmount: string }> {
   const buySolBn = new BN(Math.floor(buyLamports));
   const buySol = buyLamports / 1e9;
-  const isMigrated = await checkMigration(connection, mint);
-
-  // 2. Buyback
-  let buySig: string;
+  const ata = getAssociatedTokenAddressSync(mint, keypair.publicKey, true, TOKEN_2022_PROGRAM_ID);
 
   if (isMigrated) {
     const onlineAmm = new OnlinePumpAmmSdk(connection);
     const poolPda = canonicalPumpPoolPda(mint);
-    const ata = getAssociatedTokenAddressSync(mint, keypair.publicKey, true, TOKEN_2022_PROGRAM_ID);
     const swapState = await onlineAmm.swapSolanaState(poolPda, keypair.publicKey, ata);
     const buyIx = await PUMP_AMM_SDK.buyQuoteInput(swapState, buySolBn, 5);
     appendV2Account(buyIx, PUMP_AMM_PROGRAM_ID, poolV2Pda(mint));
     const buyTx = new Transaction().add(...buyIx);
-    buySig = await sendTx(connection, buyTx, keypair);
+    txs.push(await sendTx(connection, buyTx, keypair));
   } else {
     const global = await sdk.fetchGlobal();
     const buyState = await sdk.fetchBuyState(mint, keypair.publicKey, TOKEN_2022_PROGRAM_ID);
@@ -196,34 +246,91 @@ export async function runCycle(): Promise<CycleResult> {
     });
     appendV2Account(buyIx, PUMP_PROGRAM_ID, bondingCurveV2Pda(mint));
     const buyTx = new Transaction().add(...buyIx);
-    buySig = await sendTx(connection, buyTx, keypair);
+    txs.push(await sendTx(connection, buyTx, keypair));
   }
-  txs.push(buySig);
 
-  // 3. Burn
+  // Burn
   await new Promise((r) => setTimeout(r, 3000));
-  const ata = getAssociatedTokenAddressSync(mint, keypair.publicKey, true, TOKEN_2022_PROGRAM_ID);
   let tokenBalance = BigInt(0);
   try {
     const tokenInfo = await connection.getTokenAccountBalance(ata);
     tokenBalance = BigInt(tokenInfo.value.amount);
-  } catch {
-    // ATA may not exist if buyback returned 0 tokens
-  }
+  } catch {}
 
   let burnedAmount = "0";
   if (tokenBalance > BigInt(0)) {
-    const burnIx = createBurnInstruction(
-      ata, mint, keypair.publicKey, tokenBalance, [], TOKEN_2022_PROGRAM_ID
-    );
+    const burnIx = createBurnInstruction(ata, mint, keypair.publicKey, tokenBalance, [], TOKEN_2022_PROGRAM_ID);
     const burnTx = new Transaction().add(burnIx);
-    const burnSig = await sendTx(connection, burnTx, keypair);
-    txs.push(burnSig);
+    txs.push(await sendTx(connection, burnTx, keypair));
     burnedAmount = tokenBalance.toString();
   }
 
-  // 4. Save to Supabase
-  await saveStats(balanceSol, buySol, burnedAmount, txs);
+  return { buySol, burnedAmount };
+}
 
-  return { claimed: balanceSol, boughtBack: buySol, burned: burnedAmount, txs, skipped: false };
+export async function runCycle(): Promise<CycleResult> {
+  const { keypair, mint, rpcUrl, minClaimSol } = getConfig();
+  const connection = new Connection(rpcUrl, "confirmed");
+  const sdk = new OnlinePumpSdk(connection);
+  const txs: string[] = [];
+
+  const balanceLamports = await sdk.getCreatorVaultBalanceBothPrograms(keypair.publicKey);
+  const balanceSol = balanceLamports.toNumber() / 1e9;
+
+  if (balanceSol < minClaimSol) {
+    return { claimed: 0, boughtBack: 0, burned: "0", lpSol: 0, strategy: "skipped", txs: [], skipped: true };
+  }
+
+  // 1. Claim
+  const claimIx = await sdk.collectCoinCreatorFeeInstructions(keypair.publicKey, keypair.publicKey);
+  appendV2Account(claimIx, PUMP_PROGRAM_ID, bondingCurveV2Pda(mint));
+  appendV2Account(claimIx, PUMP_AMM_PROGRAM_ID, poolV2Pda(mint));
+  const claimTx = new Transaction().add(...claimIx);
+  txs.push(await sendTx(connection, claimTx, keypair));
+
+  await new Promise((r) => setTimeout(r, 3000));
+
+  const txFeeSol = 0.005;
+  const availableLamports = Math.max(0, balanceLamports.toNumber() - txFeeSol * 1e9);
+  if (availableLamports <= 0) {
+    await saveStats(balanceSol, 0, "0", 0, "none", txs);
+    return { claimed: balanceSol, boughtBack: 0, burned: "0", lpSol: 0, strategy: "none", txs, skipped: false };
+  }
+
+  const isMigrated = await checkMigration(connection, mint);
+
+  // 2. Pick strategy — LP only available after migration
+  const strategy = isMigrated ? pickStrategy() : { name: "full-burn", buybackFraction: 1.0, lpFraction: 0.0 };
+
+  let lpSol = 0;
+  let buyLamports = availableLamports;
+
+  // 3. LP (if applicable)
+  if (isMigrated && strategy.lpFraction > 0) {
+    const lpLamports = Math.floor(availableLamports * strategy.lpFraction);
+    buyLamports = availableLamports - lpLamports;
+
+    const lpResult = await addLiquidity(connection, keypair, mint, lpLamports, txs);
+    if (lpResult === -1) {
+      // LP failed — redirect to buyback
+      buyLamports = availableLamports;
+    } else {
+      lpSol = lpResult;
+    }
+  }
+
+  // 4. Buyback + burn
+  let buySol = 0;
+  let burnedAmount = "0";
+
+  if (buyLamports > 0 && strategy.buybackFraction > 0) {
+    const result = await doBuyback(connection, keypair, mint, sdk, isMigrated, buyLamports, txs);
+    buySol = result.buySol;
+    burnedAmount = result.burnedAmount;
+  }
+
+  // 5. Save
+  await saveStats(balanceSol, buySol, burnedAmount, lpSol, strategy.name, txs);
+
+  return { claimed: balanceSol, boughtBack: buySol, burned: burnedAmount, lpSol, strategy: strategy.name, txs, skipped: false };
 }
