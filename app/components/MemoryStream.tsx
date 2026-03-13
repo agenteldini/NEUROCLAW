@@ -3,71 +3,70 @@
 import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 
-interface Entry {
+interface Memory {
   id: number;
-  text: string;
-  time: string;
+  content: string;
+  created_at: string;
 }
 
-const ACTIVITY = [
-  "recalled a conversation from 12 days ago",
-  "linked two unrelated memories together",
-  "stored a new context fragment",
-  "noticed a recurring pattern",
-  "updated its understanding of a topic",
-  "merged duplicate memories",
-  "replayed a decision from last week",
-  "built a new association chain",
-  "compressed old memories into summary",
-  "flagged a contradiction in its history",
-  "processed an incoming input",
-  "deepened a long-term memory",
-  "traced a thought back to its origin",
-  "reinforced a fading connection",
-  "reorganized a cluster of related memories",
-];
-
-function now() {
-  return new Date().toLocaleTimeString("en-GB", {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+function timeAgo(date: string) {
+  const seconds = Math.floor(
+    (Date.now() - new Date(date).getTime()) / 1000
+  );
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
 }
 
 export default function MemoryStream() {
-  const [entries, setEntries] = useState<Entry[]>([]);
+  const [memories, setMemories] = useState<Memory[]>([]);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    let n = 0;
-    const seed = Array.from({ length: 5 }, () => ({
-      id: n++,
-      text: ACTIVITY[Math.floor(Math.random() * ACTIVITY.length)],
-      time: now(),
-    }));
-    setEntries(seed);
+    fetch("/api/memories")
+      .then((r) => r.json())
+      .then((data) => {
+        setMemories(data.memories || []);
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
 
     const iv = setInterval(() => {
-      setEntries((prev) =>
-        [
-          {
-            id: n++,
-            text: ACTIVITY[Math.floor(Math.random() * ACTIVITY.length)],
-            time: now(),
-          },
-          ...prev,
-        ].slice(0, 7)
-      );
-    }, 3500);
+      fetch("/api/memories")
+        .then((r) => r.json())
+        .then((data) => setMemories(data.memories || []))
+        .catch(() => {});
+    }, 60000);
 
     return () => clearInterval(iv);
   }, []);
 
+  if (loading) {
+    return (
+      <div className="py-6 text-center text-[14px]" style={{ color: "var(--gray-400)" }}>
+        loading memories...
+      </div>
+    );
+  }
+
+  if (memories.length === 0) {
+    return (
+      <div className="py-6 text-center text-[14px]" style={{ color: "var(--gray-400)" }}>
+        no memories yet — waiting for first thought
+      </div>
+    );
+  }
+
   return (
     <div>
       <AnimatePresence mode="popLayout">
-        {entries.map((e, i) => (
+        {memories.slice(0, 8).map((m, i) => (
           <motion.div
-            key={e.id}
+            key={m.id}
             layout
             initial={{ opacity: 0, y: -6 }}
             animate={{ opacity: i === 0 ? 1 : 0.35, y: 0 }}
@@ -77,10 +76,13 @@ export default function MemoryStream() {
             style={{ borderBottom: "1px solid rgba(0,0,0,0.04)" }}
           >
             <span className="text-[14px]" style={{ color: "var(--dark)" }}>
-              {e.text}
+              {m.content}
             </span>
-            <span className="text-[13px] ml-3" style={{ color: "var(--gray-300)" }}>
-              {e.time}
+            <span
+              className="text-[13px] ml-3"
+              style={{ color: "var(--gray-300)" }}
+            >
+              {timeAgo(m.created_at)}
             </span>
           </motion.div>
         ))}

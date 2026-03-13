@@ -1,0 +1,14 @@
+name: NEUROCLAW Think
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+jobs:
+  think:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger agent think
+        run: |
+          curl -s -X GET "https://www.neuroclaw.fun/api/agent/think" \
+            -H "Content-Type: application/json"

@@ -1,11 +1,6 @@
-import OpenAI from "openai";
 import { getSupabaseAdmin } from "./supabase";
 
-let _openai: OpenAI | null = null;
-function getOpenAI() {
-  if (!_openai) _openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-  return _openai;
-}
+const KIE_URL = "https://api.kie.ai/gpt-5-2/v1/chat/completions";
 
 function getDayNumber(bornAt: string): number {
   const born = new Date(bornAt);
@@ -13,29 +8,53 @@ function getDayNumber(bornAt: string): number {
   return Math.floor((now.getTime() - born.getTime()) / (1000 * 60 * 60 * 24)) + 1;
 }
 
-export async function think() {
-  const { data: state } = await getSupabaseAdmin()
-    .from("agent_state")
-    .select("*")
-    .single();
+async function callGPT(messages: { role: string; content: string }[]): Promise<string> {
+  const res = await fetch(KIE_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.KIE_API_KEY}`,
+    },
+    body: JSON.stringify({
+      messages: messages.map((m) => ({
+        role: m.role,
+        content: [{ type: "text", text: m.content }],
+      })),
+      stream: false,
+      reasoning_effort: "low",
+    }),
+  });
 
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`kie.ai error ${res.status}: ${text}`);
+  }
+
+  const data = await res.json();
+  return data.choices?.[0]?.message?.content || data.choices?.[0]?.delta?.content || "";
+}
+
+export async function think() {
+  const db = getSupabaseAdmin();
+
+  const { data: state } = await db.from("agent_state").select("*").single();
   if (!state) throw new Error("agent_state not found");
 
   const day = getDayNumber(state.born_at);
 
-  const { data: recentInputs } = await getSupabaseAdmin()
+  const { data: recentInputs } = await db
     .from("inputs")
     .select("*")
     .order("created_at", { ascending: false })
     .limit(20);
 
-  const { data: recentMemories } = await getSupabaseAdmin()
+  const { data: recentMemories } = await db
     .from("memories")
     .select("*")
     .order("created_at", { ascending: false })
     .limit(30);
 
-  const { data: recentLogs } = await getSupabaseAdmin()
+  const { data: recentLogs } = await db
     .from("logs")
     .select("*")
     .order("created_at", { ascending: false })
@@ -83,22 +102,17 @@ ${logsContext || "(this is your first thought)"}
 
 Think. What's on your mind? Write your log entry.`;
 
-  const response = await getOpenAI().chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt },
-    ],
-    temperature: 0.9,
-    max_tokens: 600,
-  });
+  const raw = await callGPT([
+    { role: "developer", content: systemPrompt },
+    { role: "user", content: userPrompt },
+  ]);
 
-  const raw = response.choices[0]?.message?.content?.trim();
-  if (!raw) throw new Error("empty response from openai");
+  if (!raw) throw new Error("empty response from kie.ai");
 
   let parsed: { title: string; body: string; mood: string; memories: string[] };
   try {
-    parsed = JSON.parse(raw);
+    const cleaned = raw.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+    parsed = JSON.parse(cleaned);
   } catch {
     parsed = {
       title: "thoughts",
@@ -108,7 +122,7 @@ Think. What's on your mind? Write your log entry.`;
     };
   }
 
-  const { error: logError } = await getSupabaseAdmin().from("logs").insert({
+  const { error: logError } = await db.from("logs").insert({
     day,
     title: parsed.title,
     body: parsed.body,
@@ -123,10 +137,10 @@ Think. What's on your mind? Write your log entry.`;
       content: m,
       source: "agent",
     }));
-    await getSupabaseAdmin().from("memories").insert(memoryRows);
+    await db.from("memories").insert(memoryRows);
   }
 
-  await getSupabaseAdmin()
+  await db
     .from("agent_state")
     .update({
       total_memories: state.total_memories + parsed.memories.length,

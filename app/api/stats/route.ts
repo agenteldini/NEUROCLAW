@@ -13,7 +13,8 @@ export async function GET() {
 
   const born = new Date(state.born_at);
   const now = new Date();
-  const daysAlive = Math.floor((now.getTime() - born.getTime()) / (1000 * 60 * 60 * 24)) + 1;
+  const daysAlive =
+    Math.floor((now.getTime() - born.getTime()) / (1000 * 60 * 60 * 24)) + 1;
 
   return NextResponse.json({
     days_alive: daysAlive,
