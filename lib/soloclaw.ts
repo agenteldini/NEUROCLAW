@@ -42,6 +42,9 @@ function getConfig() {
   const privKey = process.env.AGENT_PRIVATE_KEY;
   if (!privKey) throw new Error("AGENT_PRIVATE_KEY not set");
 
+  const mintAddr = process.env.MINT_ADDRESS;
+  if (!mintAddr) throw new Error("MINT_ADDRESS not set");
+
   let keypair: Keypair;
   if (privKey.startsWith("[")) {
     keypair = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(privKey)));
@@ -49,7 +52,7 @@ function getConfig() {
     keypair = Keypair.fromSecretKey(bs58.decode(privKey));
   }
 
-  const mint = new PublicKey(process.env.MINT_ADDRESS!);
+  const mint = new PublicKey(mintAddr);
   const rpcUrl = process.env.RPC_URL || "https://api.mainnet-beta.solana.com";
   const minClaimSol = parseFloat(process.env.MIN_CLAIM_SOL || "0.01");
 
@@ -104,6 +107,25 @@ async function checkMigration(connection: Connection, mint: PublicKey): Promise<
   }
 }
 
+async function saveStats(claimed: number, boughtBack: number, burned: string, txs: string[]) {
+  const db = getSupabaseAdmin();
+  const { data: existing } = await db
+    .from("agent_stats")
+    .select("*")
+    .eq("id", "default")
+    .single();
+
+  await db.from("agent_stats").upsert({
+    id: "default",
+    total_claimed: (existing?.total_claimed || 0) + claimed,
+    total_bought_back: (existing?.total_bought_back || 0) + boughtBack,
+    total_burned: (BigInt(existing?.total_burned || "0") + BigInt(burned)).toString(),
+    last_run_at: new Date().toISOString(),
+    transactions: txs,
+    updated_at: new Date().toISOString(),
+  });
+}
+
 export async function runCycle(): Promise<CycleResult> {
   const { keypair, mint, rpcUrl, minClaimSol } = getConfig();
   const connection = new Connection(rpcUrl, "confirmed");
@@ -117,8 +139,10 @@ export async function runCycle(): Promise<CycleResult> {
     return { claimed: 0, boughtBack: 0, burned: "0", txs: [], skipped: true };
   }
 
-  // 1. Claim fees
+  // 1. Claim fees (with v2 PDA for both programs)
   const claimIx = await sdk.collectCoinCreatorFeeInstructions(keypair.publicKey, keypair.publicKey);
+  appendV2Account(claimIx, PUMP_PROGRAM_ID, bondingCurveV2Pda(mint));
+  appendV2Account(claimIx, PUMP_AMM_PROGRAM_ID, poolV2Pda(mint));
   const claimTx = new Transaction().add(...claimIx);
   const claimSig = await sendTx(connection, claimTx, keypair);
   txs.push(claimSig);
@@ -128,6 +152,7 @@ export async function runCycle(): Promise<CycleResult> {
   const txFeeSol = 0.005;
   const buyLamports = Math.max(0, balanceLamports.toNumber() - txFeeSol * 1e9);
   if (buyLamports <= 0) {
+    await saveStats(balanceSol, 0, "0", txs);
     return { claimed: balanceSol, boughtBack: 0, burned: "0", txs, skipped: false };
   }
 
@@ -144,8 +169,7 @@ export async function runCycle(): Promise<CycleResult> {
     const ata = getAssociatedTokenAddressSync(mint, keypair.publicKey, true, TOKEN_2022_PROGRAM_ID);
     const swapState = await onlineAmm.swapSolanaState(poolPda, keypair.publicKey, ata);
     const buyIx = await PUMP_AMM_SDK.buyQuoteInput(swapState, buySolBn, 5);
-    const v2 = poolV2Pda(mint);
-    appendV2Account(buyIx, PUMP_AMM_PROGRAM_ID, v2);
+    appendV2Account(buyIx, PUMP_AMM_PROGRAM_ID, poolV2Pda(mint));
     const buyTx = new Transaction().add(...buyIx);
     buySig = await sendTx(connection, buyTx, keypair);
   } else {
@@ -170,8 +194,7 @@ export async function runCycle(): Promise<CycleResult> {
       slippage: 2,
       tokenProgram: TOKEN_2022_PROGRAM_ID,
     });
-    const v2 = bondingCurveV2Pda(mint);
-    appendV2Account(buyIx, PUMP_PROGRAM_ID, v2);
+    appendV2Account(buyIx, PUMP_PROGRAM_ID, bondingCurveV2Pda(mint));
     const buyTx = new Transaction().add(...buyIx);
     buySig = await sendTx(connection, buyTx, keypair);
   }
@@ -180,18 +203,18 @@ export async function runCycle(): Promise<CycleResult> {
   // 3. Burn
   await new Promise((r) => setTimeout(r, 3000));
   const ata = getAssociatedTokenAddressSync(mint, keypair.publicKey, true, TOKEN_2022_PROGRAM_ID);
-  const tokenInfo = await connection.getTokenAccountBalance(ata);
-  const tokenBalance = BigInt(tokenInfo.value.amount);
-  let burnedAmount = "0";
+  let tokenBalance = BigInt(0);
+  try {
+    const tokenInfo = await connection.getTokenAccountBalance(ata);
+    tokenBalance = BigInt(tokenInfo.value.amount);
+  } catch {
+    // ATA may not exist if buyback returned 0 tokens
+  }
 
+  let burnedAmount = "0";
   if (tokenBalance > BigInt(0)) {
     const burnIx = createBurnInstruction(
-      ata,
-      mint,
-      keypair.publicKey,
-      tokenBalance,
-      [],
-      TOKEN_2022_PROGRAM_ID
+      ata, mint, keypair.publicKey, tokenBalance, [], TOKEN_2022_PROGRAM_ID
     );
     const burnTx = new Transaction().add(burnIx);
     const burnSig = await sendTx(connection, burnTx, keypair);
@@ -200,33 +223,7 @@ export async function runCycle(): Promise<CycleResult> {
   }
 
   // 4. Save to Supabase
-  const db = getSupabaseAdmin();
+  await saveStats(balanceSol, buySol, burnedAmount, txs);
 
-  const { data: existing } = await db
-    .from("agent_stats")
-    .select("*")
-    .eq("id", "default")
-    .single();
-
-  const stats = {
-    id: "default",
-    total_claimed: (existing?.total_claimed || 0) + balanceSol,
-    total_bought_back: (existing?.total_bought_back || 0) + buySol,
-    total_burned: (
-      BigInt(existing?.total_burned || "0") + tokenBalance
-    ).toString(),
-    last_run_at: new Date().toISOString(),
-    transactions: txs,
-    updated_at: new Date().toISOString(),
-  };
-
-  await db.from("agent_stats").upsert(stats);
-
-  return {
-    claimed: balanceSol,
-    boughtBack: buySol,
-    burned: burnedAmount,
-    txs,
-    skipped: false,
-  };
+  return { claimed: balanceSol, boughtBack: buySol, burned: burnedAmount, txs, skipped: false };
 }

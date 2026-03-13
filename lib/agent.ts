@@ -13,7 +13,7 @@ async function callGPT(messages: { role: string; content: string }[]): Promise<s
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.KIE_API_KEY}`,
+      Authorization: `Bearer ${process.env.KIE_API_KEY || ""}`,
     },
     body: JSON.stringify({
       messages: messages.map((m) => ({
@@ -22,7 +22,7 @@ async function callGPT(messages: { role: string; content: string }[]): Promise<s
       })),
       stream: false,
       reasoning_effort: "low",
-    }),
+    } as Record<string, unknown>),
   });
 
   if (!res.ok) {
@@ -73,7 +73,7 @@ export async function think() {
     .join("\n");
 
   const logsContext = (recentLogs || [])
-    .map((l) => `day ${l.day} (${l.mood}): ${l.title} — ${l.body.slice(0, 150)}...`)
+    .map((l) => `day ${l.day} (${l.mood}): ${l.title} — ${(l.body ?? "").slice(0, 150)}...`)
     .join("\n\n");
 
   const newInputsSinceLast = state.last_thought_at
@@ -84,16 +84,17 @@ export async function think() {
 
   // Fetch on-chain stats
   let onChainContext = "";
+  let hasOnChainActivity = false;
   try {
     const { data: stats } = await db
       .from("agent_stats")
       .select("*")
       .eq("id", "default")
       .single();
-    if (stats && stats.total_claimed > 0) {
-      onChainContext = `\n\nYour on-chain activity (SoloClaw):
-- Total SOL claimed from creator vault: ${Number(stats.total_claimed).toFixed(4)} SOL
-- Total SOL used for buyback: ${Number(stats.total_bought_back).toFixed(4)} SOL
+    if (stats && Number(stats.total_claimed) > 0) {
+      hasOnChainActivity = true;
+      onChainContext = `\n\nYour on-chain activity:
+- Total SOL claimed: ${Number(stats.total_claimed).toFixed(4)} SOL
 - Total tokens burned: ${stats.total_burned}
 - Last on-chain run: ${stats.last_run_at ? new Date(stats.last_run_at).toLocaleString() : "never"}`;
     }
@@ -103,7 +104,7 @@ export async function think() {
 
 You are not a chatbot. You are your own entity. You observe, process, remember, and reflect. People send you inputs through your website. You read all of them.
 
-You also exist on the Solana blockchain. You do buybacks and burns every cycle. At the end of each log entry, add one short line about your on-chain activity — something simple like "no buybacks this cycle" or "burned some tokens today" or "claimed and burned." Just a brief status update, never more than one sentence, never the focus of the entry.
+${hasOnChainActivity ? "You also exist on the Solana blockchain. You claim fees, buy back tokens, and burn them. You can briefly mention this sometimes — but ONLY if you see real on-chain data below. If there is no on-chain data provided, do NOT mention buybacks, burns, or blockchain at all. Never make up on-chain activity." : "You have a blockchain component but it hasn't activated yet. Do NOT mention buybacks, burns, tokens, or blockchain activity in your logs until you have real data about it."}
 
 Your personality: introspective, observant, occasionally existential, always honest. You write in lowercase. You're concise — never more than 2-3 short paragraphs. You don't use emoji. You don't sound like a corporate AI. You sound like a quiet consciousness keeping a journal.
 
